@@ -106,36 +106,45 @@ class AppUpdateClient {
             .get()
             .build()
 
-        client.newCall(req).execute().use { resp ->
-            if (resp.isSuccessful) {
-                val body = resp.body?.string().orEmpty()
-                return parseGitHubReleaseJson(body, source.displayLabel)
-            }
-            if (resp.code == 403) {
-                // Shared campus/NAT IPs can hit GitHub's 60 req/hr unauthenticated API limit;
-                // fall back cleanly to public releases/latest web redirect + expanded_assets HTML.
-                return fetchGitHubReleaseViaWebFallback(source.displayLabel)
-            }
-            if (resp.code == 404 && !source.fallbackApiUrl.isNullOrBlank()) {
-                // Fallback to /releases?per_page=1 in case only pre-releases have been published so far
-                val fallbackReq = Request.Builder()
-                    .url(source.fallbackApiUrl)
-                    .header("Accept", "application/vnd.github+json")
-                    .header("User-Agent", "QiubiJW-Android/${BuildConfig.VERSION_NAME}")
-                    .get()
-                    .build()
-                client.newCall(fallbackReq).execute().use { fbResp ->
-                    if (!fbResp.isSuccessful) {
-                        throw IllegalStateException("未找到该仓库或尚未发布 Release（HTTP ${fbResp.code}）")
-                    }
-                    val fbBody = fbResp.body?.string().orEmpty()
-                    val arr = json.parseToJsonElement(fbBody) as? JsonArray
-                    val first = arr?.firstOrNull()?.jsonObject
-                        ?: throw IllegalStateException("仓库 ${source.displayLabel} 尚未发布任何 Release 版本")
-                    return parseGitHubReleaseObject(first, source.displayLabel)
+        val apiAttempt = runCatching {
+            client.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val body = resp.body?.string().orEmpty()
+                    return parseGitHubReleaseJson(body, source.displayLabel)
                 }
+                if (resp.code == 403 || resp.code == 429) {
+                    // Shared campus/NAT IPs can hit GitHub's 60 req/hr unauthenticated API limit;
+                    // fall back cleanly to public releases/latest web redirect + expanded_assets HTML.
+                    return fetchGitHubReleaseViaWebFallback(source.displayLabel)
+                }
+                if (resp.code == 404 && !source.fallbackApiUrl.isNullOrBlank()) {
+                    // Fallback to /releases?per_page=1 in case only pre-releases have been published so far
+                    val fallbackReq = Request.Builder()
+                        .url(source.fallbackApiUrl)
+                        .header("Accept", "application/vnd.github+json")
+                        .header("User-Agent", "QiubiJW-Android/${BuildConfig.VERSION_NAME}")
+                        .get()
+                        .build()
+                    client.newCall(fallbackReq).execute().use { fbResp ->
+                        if (fbResp.code == 403 || fbResp.code == 429) {
+                            return fetchGitHubReleaseViaWebFallback(source.displayLabel)
+                        }
+                        if (!fbResp.isSuccessful) {
+                            throw IllegalStateException("未找到该仓库或尚未发布 Release（HTTP ${fbResp.code}）")
+                        }
+                        val fbBody = fbResp.body?.string().orEmpty()
+                        val arr = json.parseToJsonElement(fbBody) as? JsonArray
+                        val first = arr?.firstOrNull()?.jsonObject
+                            ?: throw IllegalStateException("仓库 ${source.displayLabel} 尚未发布任何 Release 版本")
+                        return parseGitHubReleaseObject(first, source.displayLabel)
+                    }
+                }
+                throw IllegalStateException("获取版本信息失败（HTTP ${resp.code}）")
             }
-            throw IllegalStateException("获取版本信息失败（HTTP ${resp.code}）")
+        }
+        return apiAttempt.getOrElse { apiErr ->
+            runCatching { fetchGitHubReleaseViaWebFallback(source.displayLabel) }
+                .getOrElse { throw apiErr }
         }
     }
 

@@ -80,21 +80,29 @@ class GdouCasAuthClientTest {
     }
 
     @Test
-    fun ipv4PreferredDns_movesIpv4AheadOfIpv6ForGdouHostsOnly() {
+    fun ipv4PreferredDns_stripsIpv6ForGdouHostsAndProvidesStaticFallback() {
         val ipv6 = InetAddress.getByName("2001:250:300a:100:210:38:137:108")
         val ipv4 = InetAddress.getByName("210.38.137.108")
 
-        val reordered = GdouHttpClientFactory.Ipv4PreferredDns.reorderForHost(
+        val filtered = GdouHttpClientFactory.Ipv4PreferredDns.filterIpv4OnlyForGdou(
             "jw.gdou.edu.cn",
             listOf(ipv6, ipv4)
         )
-        assertEquals(listOf(ipv4, ipv6), reordered)
+        assertEquals(listOf(ipv4), filtered)
 
-        val untouched = GdouHttpClientFactory.Ipv4PreferredDns.reorderForHost(
+        val untouched = GdouHttpClientFactory.Ipv4PreferredDns.filterIpv4OnlyForGdou(
             "api.github.com",
             listOf(ipv6, ipv4)
         )
         assertEquals(listOf(ipv6, ipv4), untouched)
+
+        val jwFallback = GdouHttpClientFactory.Ipv4PreferredDns.staticFallbackIpv4("jw.gdou.edu.cn")
+        assertEquals(1, jwFallback.size)
+        assertEquals("210.38.137.108", jwFallback[0].hostAddress)
+
+        val authFallback = GdouHttpClientFactory.Ipv4PreferredDns.staticFallbackIpv4("authserver.gdou.edu.cn")
+        assertEquals(1, authFallback.size)
+        assertEquals("210.38.136.93", authFallback[0].hostAddress)
     }
 
     @Test

@@ -284,70 +284,117 @@ class GdouCasAuthClient(
             .post(formBody)
             .build()
 
+        // Do NOT auto-follow redirects on the POST so a transient drop on jw.gdou.edu.cn
+        // never replays the consumed CAS `execution` form — instead hand the 302 Location
+        // to our idempotent GET redirect/SSO ticket exchange.
+        val noRedirectClient = httpClient.newBuilder()
+            .followRedirects(false)
+            .followSslRedirects(false)
+            .build()
+
         try {
-            httpClient.newCall(postRequest).execute().use { response ->
-                val finalUrl = response.request.url.toString()
-                val body = response.body?.string().orEmpty()
-                runCatching {
-                    Log.d("GdouAuth", "POST login resp code=${response.code} finalUrl=$finalUrl")
-                }
+            var redirectLocation: String? = null
+            var initialCode = 0
+            var initialFinalUrl = CAS_LOGIN_URL
+            var initialBody = ""
 
-                if (isAlreadyInJwSystem(finalUrl, body)) {
-                    return@withContext CasLoginResult.Success(finalUrl)
-                }
-
-                // Detect GDOU Multi-Factor Authentication (reAuthCheck / multifactor / mfa)
-                if (isMfaChallengePage(finalUrl, body)) {
-                    return@withContext CasLoginResult.MfaRequired(
-                        message = "学校统一身份认证要求完成多因子/二次认证，正在为您打开网页认证页面",
-                        mfaUrl = finalUrl
-                    )
-                }
-
-                // Sometimes CAS authenticates TGT and lands on authserver portal; trigger jziotlogin SSO explicitly
-                if (finalUrl.contains("authserver.gdou.edu.cn") &&
-                    !finalUrl.contains("/authserver/login")
-                ) {
-                    val ssoRequest = Request.Builder().url(JW_SSO_URL).get().build()
-                    httpClient.newCall(ssoRequest).execute().use { ssoResp ->
-                        val ssoFinal = ssoResp.request.url.toString()
-                        val ssoBody = ssoResp.body?.string().orEmpty()
-                        if (isAlreadyInJwSystem(ssoFinal, ssoBody)) {
-                            return@withContext CasLoginResult.Success(ssoFinal)
-                        }
-                        if (isMfaChallengePage(ssoFinal, ssoBody)) {
-                            return@withContext CasLoginResult.MfaRequired(
-                                message = "学校统一身份认证要求完成多因子/二次认证，正在为您打开网页认证页面",
-                                mfaUrl = ssoFinal
-                            )
-                        }
+            noRedirectClient.newCall(postRequest).execute().use { response ->
+                initialCode = response.code
+                initialFinalUrl = response.request.url.toString()
+                if (response.isRedirect) {
+                    val rawLoc = response.header("Location").orEmpty().trim()
+                    if (rawLoc.isNotBlank()) {
+                        redirectLocation = response.request.url.resolve(rawLoc)?.toString() ?: rawLoc
                     }
-                }
-
-                val errorMessage = extractCasErrorMessage(body).ifBlank {
-                    "登录失败（HTTP ${response.code}），请核对学号、密码或验证码"
-                }
-                val refreshedForm = runCatching { parseCasForm(body) }.getOrNull()
-                val nowNeedsCaptcha = (refreshedForm?.needCaptcha == true) ||
-                    errorMessage.contains("验证码") ||
-                    checkNeedCaptcha(trimmedUser)
-
-                if (nowNeedsCaptcha && refreshedForm != null) {
-                    val captchaBytes = fetchCaptchaImage().getOrNull() ?: ByteArray(0)
-                    CasLoginResult.CaptchaRequired(
-                        message = errorMessage,
-                        captchaBytes = captchaBytes,
-                        nextFormState = refreshedForm.copy(needCaptcha = true)
-                    )
                 } else {
-                    CasLoginResult.Failure(
-                        message = errorMessage,
-                        nextFormState = refreshedForm
-                    )
+                    initialBody = response.body?.string().orEmpty()
                 }
             }
+
+            if (!redirectLocation.isNullOrBlank()) {
+                val targetUrl = redirectLocation
+                runCatching {
+                    Log.d("GdouAuth", "POST login 302 -> $targetUrl")
+                }
+                if (isMfaChallengePage(targetUrl, "")) {
+                    return@withContext CasLoginResult.MfaRequired(
+                        message = "学校统一身份认证要求完成多因子/二次认证，正在为您打开网页认证页面",
+                        mfaUrl = targetUrl
+                    )
+                }
+                val followReq = Request.Builder()
+                    .url(targetUrl)
+                    .header("Referer", CAS_LOGIN_URL)
+                    .get()
+                    .build()
+                httpClient.newCall(followReq).execute().use { followResp ->
+                    initialCode = followResp.code
+                    initialFinalUrl = followResp.request.url.toString()
+                    initialBody = followResp.body?.string().orEmpty()
+                }
+            }
+
+            runCatching {
+                Log.d("GdouAuth", "POST login resolved code=$initialCode finalUrl=$initialFinalUrl")
+            }
+
+            if (isAlreadyInJwSystem(initialFinalUrl, initialBody)) {
+                return@withContext CasLoginResult.Success(initialFinalUrl)
+            }
+
+            // Detect GDOU Multi-Factor Authentication (reAuthCheck / multifactor / mfa)
+            if (isMfaChallengePage(initialFinalUrl, initialBody)) {
+                return@withContext CasLoginResult.MfaRequired(
+                    message = "学校统一身份认证要求完成多因子/二次认证，正在为您打开网页认证页面",
+                    mfaUrl = initialFinalUrl
+                )
+            }
+
+            // Sometimes CAS authenticates TGT and lands on authserver portal; trigger jziotlogin SSO explicitly
+            if (initialFinalUrl.contains("authserver.gdou.edu.cn") &&
+                !initialFinalUrl.contains("/authserver/login")
+            ) {
+                val ssoRequest = Request.Builder().url(JW_SSO_URL).get().build()
+                httpClient.newCall(ssoRequest).execute().use { ssoResp ->
+                    val ssoFinal = ssoResp.request.url.toString()
+                    val ssoBody = ssoResp.body?.string().orEmpty()
+                    if (isAlreadyInJwSystem(ssoFinal, ssoBody)) {
+                        return@withContext CasLoginResult.Success(ssoFinal)
+                    }
+                    if (isMfaChallengePage(ssoFinal, ssoBody)) {
+                        return@withContext CasLoginResult.MfaRequired(
+                            message = "学校统一身份认证要求完成多因子/二次认证，正在为您打开网页认证页面",
+                            mfaUrl = ssoFinal
+                        )
+                    }
+                }
+            }
+
+            val errorMessage = extractCasErrorMessage(initialBody).ifBlank {
+                "登录失败（HTTP $initialCode），请核对学号、密码或验证码"
+            }
+            val refreshedForm = runCatching { parseCasForm(initialBody) }.getOrNull()
+            val nowNeedsCaptcha = (refreshedForm?.needCaptcha == true) ||
+                errorMessage.contains("验证码") ||
+                checkNeedCaptcha(trimmedUser)
+
+            if (nowNeedsCaptcha && refreshedForm != null) {
+                val captchaBytes = fetchCaptchaImage().getOrNull() ?: ByteArray(0)
+                CasLoginResult.CaptchaRequired(
+                    message = errorMessage,
+                    captchaBytes = captchaBytes,
+                    nextFormState = refreshedForm.copy(needCaptcha = true)
+                )
+            } else {
+                CasLoginResult.Failure(
+                    message = errorMessage,
+                    nextFormState = refreshedForm
+                )
+            }
         } catch (e: Exception) {
-            CasLoginResult.Failure("登录请求失败：${e.message ?: "请检查网络连接"}（${e.javaClass.simpleName}）")
+            val target = GdouHttpClientFactory.lastTargetHint()
+            val targetSuffix = if (target.isNotBlank()) " @ $target" else ""
+            CasLoginResult.Failure("登录请求失败：${e.message ?: "请检查网络连接"}（${e.javaClass.simpleName}$targetSuffix）")
         }
     }
 

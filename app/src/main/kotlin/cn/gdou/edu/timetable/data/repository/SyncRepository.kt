@@ -152,8 +152,10 @@ class SyncRepository(
             val exchangeRes = authClient.exchangeSsoTicket(ssoTicketUrl)
             if (exchangeRes.isFailure && jwCookieHeader.isNullOrBlank()) {
                 val err = exchangeRes.exceptionOrNull()
+                val target = cn.gdou.edu.timetable.data.remote.GdouHttpClientFactory.lastTargetHint()
+                val targetSuffix = if (target.isNotBlank()) " @ $target" else ""
                 val errDetail = if (err != null) {
-                    "${err.message ?: "连接异常"}（${err.javaClass.simpleName}）"
+                    "${err.message ?: "连接异常"}（${err.javaClass.simpleName}$targetSuffix）"
                 } else {
                     "请检查网络后重试"
                 }

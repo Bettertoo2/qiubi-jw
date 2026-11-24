@@ -142,7 +142,7 @@ class MainViewModel(
     private val _appUpdateState = MutableStateFlow(
         AppUpdateUiState(
             availableUpdate = appUpdateClient.decodeInfo(settings.value.cachedUpdateJson)
-                ?.takeIf { it.isNewerThanCurrent() || it.isTestPreview }
+                ?.takeIf { !it.isTestPreview && it.isNewerThanCurrent() }
         )
     )
     val appUpdateState: StateFlow<AppUpdateUiState> = _appUpdateState.asStateFlow()
@@ -729,7 +729,13 @@ class MainViewModel(
         }
 
         viewModelScope.launch {
-            _appUpdateState.update { it.copy(isChecking = true, statusText = "正在检测新版本…") }
+            _appUpdateState.update {
+                it.copy(
+                    isChecking = true,
+                    availableUpdate = it.availableUpdate?.takeUnless { u -> u.isTestPreview },
+                    statusText = "正在检测新版本…"
+                )
+            }
             val result = appUpdateClient.checkLatestRelease(s.updateRepoSpec)
             val now = System.currentTimeMillis()
             result.fold(
@@ -818,7 +824,14 @@ class MainViewModel(
 
     fun dismissUpdateDialog() {
         if (_appUpdateState.value.downloadStage == ApkDownloadStage.DOWNLOADING) return
-        _appUpdateState.update { it.copy(showDialog = false) }
+        val wasPreview = _appUpdateState.value.availableUpdate?.isTestPreview == true
+        _appUpdateState.update {
+            if (wasPreview) {
+                it.copy(showDialog = false, availableUpdate = null)
+            } else {
+                it.copy(showDialog = false)
+            }
+        }
     }
 
     fun ignoreCurrentUpdate() {
