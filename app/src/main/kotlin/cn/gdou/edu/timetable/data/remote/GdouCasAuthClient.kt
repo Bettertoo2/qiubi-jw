@@ -131,6 +131,36 @@ class GdouCasAuthClient(
     }
 
     /**
+     * Exchanges a CAS SSO ticket URL (e.g. `https://jw.gdou.edu.cn/sso/jziotlogin?ticket=ST-...`)
+     * directly via our IPv4-preferred OkHttpClient so jw.gdou.edu.cn's broken IPv6 endpoint on
+     * 5G cellular networks never breaks WebView login with ERR_CONNECTION_REFUSED.
+     */
+    suspend fun exchangeSsoTicket(ssoUrl: String): Result<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val normalizedUrl = if (ssoUrl.startsWith("http://", ignoreCase = true) &&
+                ssoUrl.contains("gdou.edu.cn", ignoreCase = true)
+            ) {
+                "https://" + ssoUrl.substringAfter("://")
+            } else {
+                ssoUrl
+            }
+            val request = Request.Builder()
+                .url(normalizedUrl)
+                .header("Referer", CAS_LOGIN_URL)
+                .get()
+                .build()
+            httpClient.newCall(request).execute().use { response ->
+                val finalUrl = response.request.url.toString()
+                val body = response.body?.string().orEmpty()
+                runCatching {
+                    Log.d("GdouAuth", "SSO ticket exchange -> code=${response.code} finalUrl=$finalUrl inJw=${isAlreadyInJwSystem(finalUrl, body)}")
+                }
+                finalUrl
+            }
+        }
+    }
+
+    /**
      * Best-effort, cancellable server-side CAS & JW logout so old TGT/JSESSIONID tickets are
      * invalidated. Uses an immutable [cookieSnapshot] and a read-only CookieJar view so logout
      * redirects can never read or mutate the live [cookieJar]. Never throws.

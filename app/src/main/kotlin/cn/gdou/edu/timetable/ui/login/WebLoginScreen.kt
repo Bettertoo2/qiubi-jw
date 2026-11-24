@@ -87,8 +87,16 @@ private sealed interface JsDialogState {
 data class WebViewCapturedCookies(
     val jwCookies: String?,
     val authRootCookies: String?,
-    val authPathCookies: String?
+    val authPathCookies: String?,
+    val ssoTicketUrl: String? = null
 )
+
+internal fun isJwSsoTicketUrl(url: String?): Boolean {
+    if (url.isNullOrBlank()) return false
+    val lower = url.lowercase()
+    val isJw = lower.startsWith("https://jw.gdou.edu.cn/") || lower.startsWith("http://jw.gdou.edu.cn/")
+    return isJw && lower.contains("/sso/jziotlogin") && lower.contains("ticket=")
+}
 
 /**
  * Full-featured WebView authentication screen tailored for GDOU CAS & Multi-Factor Authentication (MFA):
@@ -138,7 +146,7 @@ fun WebLoginScreen(
             ?.joinToString("; ") { "${it.key}=${it.value}" }
     }
 
-    fun captureAndDeliverCookies(sourceUrl: String? = null) {
+    fun captureAndDeliverCookies(sourceUrl: String? = null, ssoTicketUrl: String? = null) {
         if (captured) return
         captured = true
         val cm = CookieManager.getInstance()
@@ -152,15 +160,35 @@ fun WebLoginScreen(
         val authPath = cm.getCookie("https://authserver.gdou.edu.cn/authserver")
         Log.d(
             "GdouWebLogin",
-            "Captured cookies: hasJw=${!combinedJw.isNullOrBlank()} hasAuthRoot=${!authRoot.isNullOrBlank()} hasAuthPath=${!authPath.isNullOrBlank()}"
+            "Captured cookies: hasJw=${!combinedJw.isNullOrBlank()} hasAuthRoot=${!authRoot.isNullOrBlank()} hasAuthPath=${!authPath.isNullOrBlank()} hasSsoTicket=${!ssoTicketUrl.isNullOrBlank()}"
         )
         onLoginCaptured(
             WebViewCapturedCookies(
                 jwCookies = combinedJw,
                 authRootCookies = authRoot,
-                authPathCookies = authPath
+                authPathCookies = authPath,
+                ssoTicketUrl = ssoTicketUrl
             )
         )
+    }
+
+    fun tryRescueJwNavigationError(failedUrl: String?): Boolean {
+        if (captured || failedUrl.isNullOrBlank()) return false
+        val lower = failedUrl.lowercase()
+        val isJw = lower.startsWith("https://jw.gdou.edu.cn") || lower.startsWith("http://jw.gdou.edu.cn")
+        if (!isJw) return false
+        if (isJwSsoTicketUrl(failedUrl)) {
+            Log.d("GdouWebLogin", "Rescuing failed JW SSO ticket URL via IPv4 OkHttp: $failedUrl")
+            captureAndDeliverCookies(sourceUrl = failedUrl, ssoTicketUrl = failedUrl)
+            return true
+        }
+        val authPathCookie = CookieManager.getInstance().getCookie("https://authserver.gdou.edu.cn/authserver").orEmpty()
+        if (authPathCookie.contains("CASTGC", ignoreCase = true) || authPathCookie.contains("TGC=", ignoreCase = true)) {
+            Log.d("GdouWebLogin", "Rescuing failed JW navigation using CASTGC via IPv4 OkHttp")
+            captureAndDeliverCookies(sourceUrl = failedUrl, ssoTicketUrl = GdouCasAuthClient.JW_SSO_URL)
+            return true
+        }
+        return false
     }
 
     fun checkUrlForJwSuccess(url: String?, fromPageFinished: Boolean = false) {
@@ -351,6 +379,11 @@ fun WebLoginScreen(
                 webViewClient = object : WebViewClient() {
                     override fun shouldOverrideUrlLoading(v: WebView?, request: WebResourceRequest?): Boolean {
                         val uri = request?.url ?: return false
+                        if (request.isForMainFrame && isJwSsoTicketUrl(uri.toString())) {
+                            Log.d("GdouWebLogin", "POPUP intercepting JW SSO ticket for IPv4 OkHttp exchange")
+                            captureAndDeliverCookies(sourceUrl = uri.toString(), ssoTicketUrl = uri.toString())
+                            return true
+                        }
                         return handleCustomSchemeOrNavigation(ctx, uri)
                     }
 
@@ -365,6 +398,17 @@ fun WebLoginScreen(
                         super.doUpdateVisitedHistory(v, url, isReload)
                         if (!url.isNullOrBlank()) currentUrl = url
                         checkUrlForJwSuccess(url, fromPageFinished = false)
+                    }
+
+                    override fun onReceivedError(
+                        v: WebView?,
+                        request: WebResourceRequest?,
+                        error: WebResourceError?
+                    ) {
+                        super.onReceivedError(v, request, error)
+                        if (request?.isForMainFrame == true) {
+                            tryRescueJwNavigationError(request.url?.toString())
+                        }
                     }
                 }
             }
@@ -612,6 +656,13 @@ fun WebLoginScreen(
                                         "GdouWebLogin",
                                         "shouldOverrideUrlLoading url=$uri mainFrame=${request.isForMainFrame} redirect=${request.isRedirect}"
                                     )
+                                    // Intercept CAS -> jw.gdou.edu.cn/sso/jziotlogin?ticket=... BEFORE WebView connects
+                                    // so our IPv4-preferred OkHttpClient exchanges the ticket cleanly on 5G IPv6 networks.
+                                    if (request.isForMainFrame && isJwSsoTicketUrl(uri.toString())) {
+                                        Log.d("GdouWebLogin", "Intercepting JW SSO ticket redirect for IPv4 OkHttp exchange")
+                                        captureAndDeliverCookies(sourceUrl = uri.toString(), ssoTicketUrl = uri.toString())
+                                        return true
+                                    }
                                     return handleCustomSchemeOrNavigation(context, uri)
                                 }
 
@@ -679,12 +730,16 @@ fun WebLoginScreen(
                                     error: WebResourceError?
                                 ) {
                                     super.onReceivedError(view, request, error)
+                                    val failedUrl = request?.url?.toString()
                                     Log.e(
                                         "GdouWebLogin",
-                                        "onReceivedError url=${request?.url} mainFrame=${request?.isForMainFrame} code=${error?.errorCode} desc=${error?.description}"
+                                        "onReceivedError url=$failedUrl mainFrame=${request?.isForMainFrame} code=${error?.errorCode} desc=${error?.description}"
                                     )
                                     if (request?.isForMainFrame == true) {
                                         isWaitingInitialLoad = false
+                                        if (tryRescueJwNavigationError(failedUrl)) {
+                                            return
+                                        }
                                         val desc = error?.description?.toString().orEmpty()
                                         bannerMessage = "页面加载遇到问题（$desc），可点击右上角刷新或切换电脑版重试"
                                     }

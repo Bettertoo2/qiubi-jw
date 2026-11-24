@@ -1,9 +1,11 @@
 package cn.gdou.edu.timetable.data.remote
 
+import cn.gdou.edu.timetable.ui.login.isJwSsoTicketUrl
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.net.InetAddress
 
 class GdouCasAuthClientTest {
 
@@ -75,5 +77,42 @@ class GdouCasAuthClientTest {
         assertEquals("e3s1", form.execution)
         assertEquals("Ig44SE7ZZhlbx9fB", form.pwdEncryptSalt)
         assertTrue(form.needCaptcha)
+    }
+
+    @Test
+    fun ipv4PreferredDns_movesIpv4AheadOfIpv6ForGdouHostsOnly() {
+        val ipv6 = InetAddress.getByName("2001:250:300a:100:210:38:137:108")
+        val ipv4 = InetAddress.getByName("210.38.137.108")
+
+        val reordered = GdouHttpClientFactory.Ipv4PreferredDns.reorderForHost(
+            "jw.gdou.edu.cn",
+            listOf(ipv6, ipv4)
+        )
+        assertEquals(listOf(ipv4, ipv6), reordered)
+
+        val untouched = GdouHttpClientFactory.Ipv4PreferredDns.reorderForHost(
+            "api.github.com",
+            listOf(ipv6, ipv4)
+        )
+        assertEquals(listOf(ipv6, ipv4), untouched)
+    }
+
+    @Test
+    fun isJwSsoTicketUrl_matchesOnlyJwSsoWithTicketParam() {
+        assertTrue(
+            isJwSsoTicketUrl("https://jw.gdou.edu.cn/sso/jziotlogin?ticket=ST-15209-abc")
+        )
+        assertTrue(
+            isJwSsoTicketUrl("http://jw.gdou.edu.cn/sso/jziotlogin?ticket=ST-15209-abc")
+        )
+        assertFalse(
+            isJwSsoTicketUrl("https://authserver.gdou.edu.cn/authserver/login?service=https%3A%2F%2Fjw.gdou.edu.cn%2Fsso%2Fjziotlogin")
+        )
+        assertFalse(
+            isJwSsoTicketUrl("https://jw.gdou.edu.cn/sso/jziotlogin")
+        )
+        assertFalse(
+            isJwSsoTicketUrl("https://jw.gdou.edu.cn/xtgl/index_initMenu.html")
+        )
     }
 }

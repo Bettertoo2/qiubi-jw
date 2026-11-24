@@ -133,7 +133,8 @@ class SyncRepository(
     suspend fun completeWebViewLogin(
         jwCookieHeader: String?,
         authRootCookieHeader: String?,
-        authPathCookieHeader: String? = null
+        authPathCookieHeader: String? = null,
+        ssoTicketUrl: String? = null
     ): RefreshOutcome {
         val wasAlreadyLoggedIn = credentialStore.sessionState.value.isLoggedIn
         // Clear any leftover OkHttp session cookies so fresh WebView cookies never collide with stale ones
@@ -146,6 +147,18 @@ class SyncRepository(
             pathOverride = "/authserver",
             skipExactPairs = parseCookiePairs(authRootCookieHeader)
         )
+
+        if (!ssoTicketUrl.isNullOrBlank()) {
+            val exchangeRes = authClient.exchangeSsoTicket(ssoTicketUrl)
+            if (exchangeRes.isFailure && jwCookieHeader.isNullOrBlank()) {
+                val err = exchangeRes.exceptionOrNull()
+                val msg = "教务换票连接失败：${err?.message ?: "请检查网络后重试"}"
+                if (!wasAlreadyLoggedIn) {
+                    cookieJar.clearSessionCookies(preserveMfaFingerprint = true)
+                }
+                return RefreshOutcome.Failure(msg, requiresRelogin = true)
+            }
+        }
 
         val outcome = refreshAllDataInternal(
             triggerType = "LOGIN",

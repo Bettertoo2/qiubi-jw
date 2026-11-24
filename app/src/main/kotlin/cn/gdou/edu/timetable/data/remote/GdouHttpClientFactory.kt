@@ -1,10 +1,14 @@
 package cn.gdou.edu.timetable.data.remote
 
 import okhttp3.CookieJar
+import okhttp3.Dns
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Response
 import java.io.IOException
+import java.net.Inet4Address
+import java.net.Inet6Address
+import java.net.InetAddress
 import java.util.concurrent.TimeUnit
 
 object GdouHttpClientFactory {
@@ -15,6 +19,7 @@ object GdouHttpClientFactory {
 
     fun create(cookieJar: CookieJar): OkHttpClient {
         return OkHttpClient.Builder()
+            .dns(Ipv4PreferredDns)
             .cookieJar(cookieJar)
             .followRedirects(true)
             .followSslRedirects(true)
@@ -25,6 +30,27 @@ object GdouHttpClientFactory {
             .addInterceptor(DefaultHeadersAndHttpsUpgradeInterceptor())
             .addInterceptor(TransientRetryInterceptor(maxRetries = 2))
             .build()
+    }
+
+    /**
+     * Prefers IPv4 over IPv6 for gdou.edu.cn hosts: China 5G cellular networks prioritize AAAA
+     * records, while jw.gdou.edu.cn / authserver.gdou.edu.cn IPv6 port 443 frequently refuses
+     * connections (ERR_CONNECTION_REFUSED). Keeps IPv6 as fallback on IPv6-only networks.
+     */
+    internal object Ipv4PreferredDns : Dns {
+        override fun lookup(hostname: String): List<InetAddress> {
+            val addresses = Dns.SYSTEM.lookup(hostname)
+            return reorderForHost(hostname, addresses)
+        }
+
+        internal fun reorderForHost(hostname: String, addresses: List<InetAddress>): List<InetAddress> {
+            if (!hostname.endsWith("gdou.edu.cn", ignoreCase = true) || addresses.size <= 1) {
+                return addresses
+            }
+            val ipv4 = addresses.filterIsInstance<Inet4Address>()
+            val ipv6 = addresses.filterIsInstance<Inet6Address>()
+            return if (ipv4.isNotEmpty()) ipv4 + ipv6 else addresses
+        }
     }
 
     /**

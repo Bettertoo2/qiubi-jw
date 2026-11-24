@@ -18,6 +18,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.jsoup.Jsoup
 import java.util.concurrent.TimeUnit
 
 @Serializable
@@ -111,7 +112,9 @@ class AppUpdateClient {
                 return parseGitHubReleaseJson(body, source.displayLabel)
             }
             if (resp.code == 403) {
-                throw IllegalStateException("GitHub API 请求受限（HTTP 403），请稍后再试")
+                // Shared campus/NAT IPs can hit GitHub's 60 req/hr unauthenticated API limit;
+                // fall back cleanly to public releases/latest web redirect + expanded_assets HTML.
+                return fetchGitHubReleaseViaWebFallback(source.displayLabel)
             }
             if (resp.code == 404 && !source.fallbackApiUrl.isNullOrBlank()) {
                 // Fallback to /releases?per_page=1 in case only pre-releases have been published so far
@@ -134,6 +137,80 @@ class AppUpdateClient {
             }
             throw IllegalStateException("获取版本信息失败（HTTP ${resp.code}）")
         }
+    }
+
+    private fun fetchGitHubReleaseViaWebFallback(ownerRepo: String): AppUpdateInfo {
+        val latestWebUrl = "https://github.com/$ownerRepo/releases/latest"
+        val webReq = Request.Builder()
+            .url(latestWebUrl)
+            .header("User-Agent", "QiubiJW-Android/${BuildConfig.VERSION_NAME}")
+            .get()
+            .build()
+
+        val (tagName, releaseHtml, finalUrl) = client.newCall(webReq).execute().use { resp ->
+            if (!resp.isSuccessful) {
+                throw IllegalStateException("GitHub API 受限且网页回退失败（HTTP ${resp.code}）")
+            }
+            val finalUrlStr = resp.request.url.toString()
+            val html = resp.body?.string().orEmpty()
+            val tag = finalUrlStr.substringAfter("/releases/tag/", "").substringBefore('?').substringBefore('#')
+            Triple(tag, html, finalUrlStr)
+        }
+        val versionName = VersionComparator.normalize(tagName)
+        if (versionName.isBlank()) {
+            throw IllegalStateException("GitHub API 请求受限，且未能从发布页解析到版本号")
+        }
+
+        val releaseDoc = Jsoup.parse(releaseHtml)
+        val title = releaseDoc.selectFirst("h1")?.text()?.trim().orEmpty().ifBlank { "v$versionName" }
+        val changelog = releaseDoc.selectFirst(".markdown-body")?.text()?.trim().orEmpty()
+            .ifBlank { "发现新版本 v$versionName，点击即可下载安装。" }
+        val codeHint = VERSION_CODE_HINT.find(changelog)?.groupValues?.getOrNull(1)?.toIntOrNull()
+
+        var apkUrl = ""
+        var apkName = ""
+        runCatching {
+            val assetsReq = Request.Builder()
+                .url("https://github.com/$ownerRepo/releases/expanded_assets/$tagName")
+                .header("User-Agent", "QiubiJW-Android/${BuildConfig.VERSION_NAME}")
+                .get()
+                .build()
+            client.newCall(assetsReq).execute().use { assetsResp ->
+                if (assetsResp.isSuccessful) {
+                    val doc = Jsoup.parse(assetsResp.body?.string().orEmpty())
+                    val apkLinks = doc.select("a[href]").mapNotNull { el ->
+                        val href = el.attr("href")
+                        if (href.contains("/releases/download/") && href.endsWith(".apk", ignoreCase = true)) {
+                            if (href.startsWith("http")) href else "https://github.com$href"
+                        } else null
+                    }
+                    val best = apkLinks.maxByOrNull { link ->
+                        val n = link.substringAfterLast('/').lowercase()
+                        var score = 0
+                        if (n.contains("release")) score += 4
+                        if (n.contains("universal")) score += 3
+                        if (n.contains("arm64")) score += 2
+                        if (n.contains("debug")) score -= 1
+                        score
+                    }
+                    if (!best.isNullOrBlank()) {
+                        apkUrl = best
+                        apkName = best.substringAfterLast('/')
+                    }
+                }
+            }
+        }
+
+        return AppUpdateInfo(
+            versionName = versionName,
+            versionCode = codeHint,
+            releaseTitle = title,
+            changelog = changelog,
+            releasePageUrl = finalUrl,
+            apkDownloadUrl = apkUrl,
+            apkFileName = apkName,
+            sourceLabel = ownerRepo
+        )
     }
 
     private fun fetchCustomJsonRelease(source: ResolvedUpdateSource): AppUpdateInfo {

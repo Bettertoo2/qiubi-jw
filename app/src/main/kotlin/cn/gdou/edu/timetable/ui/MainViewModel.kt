@@ -378,7 +378,8 @@ class MainViewModel(
             when (val outcome = syncRepo.completeWebViewLogin(
                 jwCookieHeader = cookies.jwCookies,
                 authRootCookieHeader = cookies.authRootCookies,
-                authPathCookieHeader = cookies.authPathCookies
+                authPathCookieHeader = cookies.authPathCookies,
+                ssoTicketUrl = cookies.ssoTicketUrl
             )) {
                 is RefreshOutcome.Success -> {
                     _loginUiState.update {
