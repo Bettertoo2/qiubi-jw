@@ -152,7 +152,12 @@ class SyncRepository(
             val exchangeRes = authClient.exchangeSsoTicket(ssoTicketUrl)
             if (exchangeRes.isFailure && jwCookieHeader.isNullOrBlank()) {
                 val err = exchangeRes.exceptionOrNull()
-                val msg = "教务换票连接失败：${err?.message ?: "请检查网络后重试"}"
+                val errDetail = if (err != null) {
+                    "${err.message ?: "连接异常"}（${err.javaClass.simpleName}）"
+                } else {
+                    "请检查网络后重试"
+                }
+                val msg = "教务换票连接失败：$errDetail"
                 if (!wasAlreadyLoggedIn) {
                     cookieJar.clearSessionCookies(preserveMfaFingerprint = true)
                 }

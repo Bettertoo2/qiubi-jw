@@ -115,4 +115,20 @@ class GdouCasAuthClientTest {
             isJwSsoTicketUrl("https://jw.gdou.edu.cn/xtgl/index_initMenu.html")
         )
     }
+
+    @Test
+    fun parseDohIpv4Json_extractsOnlyTypeAAddresses() {
+        val sample = """
+            {
+              "Status": 0,
+              "Answer": [
+                {"name": "jw.gdou.edu.cn.", "type": 1, "data": "210.38.137.108"},
+                {"name": "jw.gdou.edu.cn.", "type": 28, "data": "2001:250:300a:100:210:38:137:108"}
+              ]
+            }
+        """.trimIndent()
+        val addrs = GdouHttpClientFactory.Ipv4PreferredDns.parseDohIpv4Json("jw.gdou.edu.cn", sample)
+        assertEquals(1, addrs.size)
+        assertEquals("210.38.137.108", addrs[0].hostAddress)
+    }
 }

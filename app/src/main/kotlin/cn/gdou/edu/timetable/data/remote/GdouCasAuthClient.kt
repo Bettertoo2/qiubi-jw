@@ -347,7 +347,7 @@ class GdouCasAuthClient(
                 }
             }
         } catch (e: Exception) {
-            CasLoginResult.Failure("登录请求失败：${e.message ?: "请检查网络连接"}")
+            CasLoginResult.Failure("登录请求失败：${e.message ?: "请检查网络连接"}（${e.javaClass.simpleName}）")
         }
     }
 
